@@ -72,26 +72,76 @@ def get_partition_info(raw_file):
 def mount_raw_image(raw_file, partition):
     mount_point = "/mnt/container"
     logger.info(f"Attempting to mount RAW file to {mount_point}")
-    run_command(f"sudo mkdir -p {mount_point}")
+    
+    # First ensure mount point is clean
+    try:
+        run_command(f"sudo umount -f {mount_point}", check=False)
+    except:
+        pass
 
+    # Recreate mount point with proper permissions
+    run_command("sudo rm -rf /mnt/container")
+    run_command("sudo mkdir -p /mnt/container")
+    run_command("sudo chmod 755 /mnt/container")
+
+    # From your parted output, we can see it's an ext4 partition
+    # Let's be more specific with the mount options
     mount_options = [
-        f"loop,ro,offset={partition['start']}",
-        f"loop,ro,offset={partition['start']},type={partition['filesystem']}",
-        f"loop,ro,norecovery,offset={partition['start']}"
+        # Standard mount with explicit ext4 type
+        f"loop,offset={partition['start']},type=ext4",
+        # Try without specifying filesystem type
+        f"loop,offset={partition['start']}",
+        # Try with norecovery option
+        f"loop,offset={partition['start']},type=ext4,norecovery",
+        # Last resort - try with ro option
+        f"loop,ro,offset={partition['start']},type=ext4"
     ]
 
     for options in mount_options:
         mount_command = f"sudo mount -o {options} '{raw_file}' {mount_point}"
         logger.info(f"Trying mount command: {mount_command}")
         
-        _, mount_error = run_command(mount_command, check=False)
-        if not mount_error:
-            logger.info("Mount successful")
-            return mount_point
-        else:
-            logger.warning(f"Mount attempt failed: {mount_error}")
+        try:
+            _, mount_error = run_command(mount_command, check=False)
+            if not mount_error:
+                # Verify mount was successful
+                try:
+                    run_command(f"sudo test -d {mount_point}")
+                    logger.info("Mount successful")
+                    return mount_point
+                except:
+                    logger.warning("Mount point not accessible after mount")
+                    continue
+            else:
+                logger.warning(f"Mount attempt failed: {mount_error}")
+        except Exception as e:
+            logger.warning(f"Mount attempt error: {str(e)}")
+            continue
 
     raise Exception("All mount attempts failed")
+
+def cleanup_mount(mount_point):
+    """Helper function to safely clean up mounts"""
+    try:
+        # Check if the mount point is actually mounted
+        _, stderr = run_command("mountpoint -q " + mount_point, check=False)
+        if not stderr:
+            # Try gentle unmount first
+            run_command(f"sudo umount {mount_point}", check=False)
+            time.sleep(1)
+            
+            # If still mounted, force unmount
+            _, stderr = run_command("mountpoint -q " + mount_point, check=False)
+            if not stderr:
+                run_command(f"sudo umount -f {mount_point}", check=False)
+    except:
+        pass
+    
+    # Clean up mount point
+    try:
+        run_command(f"sudo rm -rf {mount_point}", check=False)
+    except:
+        pass
 
 def user_verify_filesystem(mount_point):
     logger.info("Displaying contents of the mounted filesystem:")
@@ -153,10 +203,7 @@ def convert_to_raw(input_file, output_dir, keep_files):
 
     finally:
         logger.info("Cleaning up")
-        try:
-            run_command(f"sudo umount {mount_point}")
-        except:
-            pass
+        cleanup_mount(mount_point)
 
         if not keep_files:
             logger.info("Removing temporary files")
